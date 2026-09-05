@@ -19,17 +19,103 @@ def load_env(filepath):
                 key, val = line.split("=", 1)
                 val = val.strip().strip("'\"")
                 os.environ[key.strip()] = val
+                
+def update_env_file(filepath, key, value):
+    """Updates variable from .env file with new value"""
+    if not os.path.exists(filepath):
+        return
+
+    updated_lines = []
+    key_found = False
+    with open(filepath, "r") as f:    
+        for line in f:
+            if line.strip().startswith(f"{key}="):
+                updated_lines.append(f"{key}={value}\n")
+                key_found = True
+            else:
+                updated_lines.append(line)
+
+    if not key_found:
+        if updated_lines and not updated_lines[-1].endswith("\n"):
+            updated_lines.append("\n")
+        updated_lines.append(f"{key}={value}\n")
+
+    with open(filepath, "w") as f:
+        f.writelines(updated_lines)
+        
+    load_env(filepath)
 
 # Load Configuration
 load_env(os.path.join(SCRIPT_DIR, ".env"))
-PRIMARY_PI = os.getenv("PRIMARY_PI", "http://192.168.254.150:82")
-PRIMARY_PASS = os.getenv("PRIMARY_APP_PASSWORD")
-SECONDARY_PI = os.getenv("SECONDARY_PI", "http://192.168.254.151:81")
-SECONDARY_PASS = os.getenv("SECONDARY_APP_PASSWORD")
+PRIMARY_PI = os.getenv("PRIMARY_PI")
+PRIMARY_APP_PASSWORD = os.getenv("PRIMARY_APP_PASSWORD")
+SECONDARY_PI = os.getenv("SECONDARY_PI")
+SECONDARY_APP_PASSWORD = os.getenv("SECONDARY_APP_PASSWORD")
 LOG_LEVEL = os.getenv("LOG_LEVEL")
 
-if not PRIMARY_PASS or not SECONDARY_PASS:
-    raise ValueError("Error: Both PRIMARY_APP_PASSWORD and SECONDARY_APP_PASSWORD must be set in .env")
+def update_env_var(var_name):
+    """Updates variables assigned above with current value in .env file"""
+    if var_name in globals():
+        globals()[var_name] = os.getenv(var_name)
+    else:
+        print(f"Variable '{var_name}' could not be found.")
+
+def check_for_pass():
+    """Check if app passwords exist. If not, we'll have to make one"""
+    if len(PRIMARY_APP_PASSWORD) == 0:
+        prompt_for_pass("PRIMARY_APP_PASSWORD", PRIMARY_PI)
+    if len(SECONDARY_APP_PASSWORD) == 0:
+        prompt_for_pass("SECONDARY_APP_PASSWORD", SECONDARY_PI)
+    return
+
+def prompt_for_pass(PASS_VAR, BASE_URL):
+    """Prompt the user for their login password for API authentication"""
+    print(f"{PASS_VAR} not found. Please enter your admin console password for {BASE_URL}:")
+    console_pass = input()
+
+    sid = get_session_sid(BASE_URL, console_pass)
+    
+    if sid is None:
+        print(f"Failed to get sid.")
+        exit(1)
+    
+    try:
+        print("Fetching application password...")
+        res = make_request(f"{BASE_URL}/api/auth/app", "GET", headers={"sid": sid})
+        if res.get("app"):
+            app_pass = res["app"]["password"]
+            app_pass_hash = res["app"]["hash"]
+            
+            setPassHash(PASS_VAR, app_pass, app_pass_hash, BASE_URL, sid)
+    except Exception as e:
+        print(f"Failed to acquire application password: {e}")
+        exit(1)
+        
+def setPassHash(pass_var, app_pass, hash, base_url, sid):
+    """Set the newly-created password hash in the pi-hole config, in the .env file, and update the global variable"""
+    try:
+        payload = {
+            "config": {
+                "webserver": {
+                    "api": {
+                        "app_pwhash": hash
+                    }
+                }
+            }
+        }
+        
+        res = make_request(f"{base_url}/api/config", "PATCH", headers={"sid": sid}, data=payload)
+        if res.get("config", {}):
+            newConf = res.get("config")
+            if newConf["webserver"]["api"]["app_pwhash"] == hash:
+                print("Successfully set application password hash in pi-hole.")
+                print("Updating .env file...")
+                update_env_file(os.path.join(SCRIPT_DIR, ".env"), pass_var, app_pass)
+                update_env_var(pass_var)
+                
+    except Exception as e:
+        print(f"Failed to set application password hash: {e}")
+        return
 
 def make_request(url, method="GET", headers=None, data=None):
     """Utility helper to send HTTP requests."""
@@ -59,6 +145,9 @@ def make_request(url, method="GET", headers=None, data=None):
 
 def get_session_sid(base_url, password):
     """Authenticates and returns a session token."""
+    if LOG_LEVEL == "debug":
+        print(f"-> Fetching sid for {base_url}")
+        
     res = make_request(f"{base_url}/api/auth", "POST", data={"password": password})
     if res.get("session", {}).get("valid"):
         return res["session"]["sid"]
@@ -109,12 +198,19 @@ def update_gravity(base_url, sid):
 
 
 def main():
+    check_for_pass()
+    
+    if not PRIMARY_APP_PASSWORD or not SECONDARY_APP_PASSWORD:
+        raise ValueError("Error: Both PRIMARY_APP_PASSWORD and SECONDARY_APP_PASSWORD must be set in .env")
+    
     p_sid = None
     s_sid = None
+    
     try:
+        print(PRIMARY_APP_PASSWORD, SECONDARY_APP_PASSWORD)
         print("Authenticating with both Pi-holes...")
-        p_sid = get_session_sid(PRIMARY_PI, PRIMARY_PASS)
-        s_sid = get_session_sid(SECONDARY_PI, SECONDARY_PASS)
+        p_sid = get_session_sid(PRIMARY_PI, PRIMARY_APP_PASSWORD)
+        s_sid = get_session_sid(SECONDARY_PI, SECONDARY_APP_PASSWORD)
         
         print("Fetching current adlists...")
         p_lists = get_adlists(PRIMARY_PI, p_sid)
