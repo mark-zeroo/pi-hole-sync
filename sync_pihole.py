@@ -183,6 +183,26 @@ def delete_adlist(base_url, sid, address):
     url = f"{base_url}/api/lists/{encoded_address}?type=block"
     return make_request(url, "DELETE", headers={"sid": sid})
 
+def enable_adlist(base_url, sid, address, comment):
+    """Enable a previously disabled adlist"""
+    payload = {
+        "comment": comment if comment is not None else "",
+        "enabled": True
+    }
+    
+    url = f"{base_url}/api/lists/{address}?type=block"
+    return make_request(url, "PUT", headers={"sid": sid}, data=payload)
+
+def disable_adlist(base_url, sid, address, comment):
+    """Disable a previously enabled adlist"""
+    payload = {
+        "comment": comment if comment is not None else "",
+        "enabled": False
+    }
+    
+    url = f"{base_url}/api/lists/{address}?type=block"
+    return make_request(url, "PUT", headers={"sid": sid}, data=payload)
+
 def update_gravity(base_url, sid):
     """Triggers a gravity db database update by trying known v6 gravity API paths."""
     print(f"Triggering gravity update on {base_url}...")
@@ -224,8 +244,10 @@ def main():
         print(f"-> Fetched {len(p_lists)} lists from Primary.")
         print(f"-> Fetched {len(s_lists)} lists from Secondary.")
         
-        p_map = {item["address"].strip().lower(): (item.get("id"), item.get("comment", ""), item.get("enabled", True)) for item in p_lists}
-        s_map = {item["address"].strip().lower(): (item.get("id"), item.get("comment", ""), item.get("enabled", True)) for item in s_lists}
+        p_map = {item["address"].strip().lower(): (item.get("id"), item.get("comment", ""), item.get("enabled")) for item in p_lists}
+        s_map = {item["address"].strip().lower(): (item.get("id"), item.get("comment", ""), item.get("enabled")) for item in s_lists}
+
+        print(p_map, s_map)
         
         if LOG_LEVEL == "debug":
             # Debugging: Print addresses to see any hidden mismatch
@@ -236,6 +258,8 @@ def main():
         
         to_add = []
         to_delete = []
+        to_disable = []
+        to_enable = []
         
         # We preserve the original casing from p_lists for the actual addition
         for item in p_lists:
@@ -243,6 +267,8 @@ def main():
             addr_key = addr_raw.strip().lower()
             if addr_key not in s_map:
                 to_add.append((addr_raw, item.get("comment", ""), item.get("enabled", True)))
+            elif item.get("enabled") == False and s_map.get(addr_key)[2] == True:
+                to_disable.append((addr_raw, item.get("comment", "")))
                 
         # We preserve the original casing from s_lists for deletion
         for item in s_lists:
@@ -250,9 +276,11 @@ def main():
             addr_key = addr_raw.strip().lower()
             if addr_key not in p_map:
                 to_delete.append(addr_raw)
+            elif item.get("enabled") == False and p_map.get(addr_key)[2] == True:
+                to_enable.append((addr_raw, item.get("comment", "")))
         
         changes_made = False
-        
+
         if to_delete:
             print(f"Removing {len(to_delete)} stale list(s) from Secondary...")
             for addr in to_delete:
@@ -265,6 +293,20 @@ def main():
             for addr, comment, enabled in to_add:
                 print(f"-> Adding: {addr}")
                 add_adlist(SECONDARY_PI, s_sid, addr, comment, enabled)
+            changes_made = True
+            
+        if to_disable:
+            print(f"Disabling {len(to_disable)} lists in Secondary...")
+            for addr, comment in to_disable:
+                print(f"-> Disabling: {addr}")
+                disable_adlist(SECONDARY_PI, s_sid, addr, comment)
+            changes_made = True
+        
+        if to_enable:
+            print(f"Enabling {len(to_enable)} lists in Secondary...")
+            for addr, comment in to_enable:
+                print(f"-> Enabling: {addr}")
+                enable_adlist(SECONDARY_PI, s_sid, addr, comment)
             changes_made = True
             
         if changes_made:
